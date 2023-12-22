@@ -2,7 +2,7 @@
 Author: Zexi Liu
 Date: 2023-11-28 17:11:02
 LastEditors: Zexi Liu
-LastEditTime: 2023-12-20 17:56:27
+LastEditTime: 2023-12-22 15:23:27
 FilePath: /seg_data_tools/main.py
 Description:
 
@@ -11,17 +11,19 @@ Copyright (c) 2023 by Uisee, All Rights Reserved.
 
 import os
 import copy
+import shutil
 import numpy as np
 from tqdm import tqdm
 import scipy.spatial as spt
 import pypcd
 
 INPUT_BIN_FOLDER = '/data/code/seg_data_tools/data/seg_pts'
-# INPUT_BIN_FOLDER = '/data/code/seg_data_tools/data/lidar_20231113111338'
 INPUT_LABEL_FOLDER = '/data/code/seg_data_tools/data/seg_results'
 INPUT_BBOX_FOLDER = '/data/code/seg_data_tools/data/dl_res'
 INPUT_LIDAR_STATE = '/data/code/seg_data_tools/data/ml_lidar_state'
 USE_HISTORY_FRAME = 5
+INPUT_PCD_FOLDER = '/data/code/seg_data_tools/data/lidar_20231113111338'
+OUTPUT_PCD_FOLDER = '/data/code/seg_data_tools/data/need_label_pcd'
 
 POINTS_CLASS_NAME = [
     'ignore', 'barrier', 'bicycle', 'bus', 'car', 'construction_vehicle', 'motorcycle',
@@ -142,32 +144,32 @@ def find_wrong_label_from_dl(pts, labels, bboxes, conf_thres, idx):
     pts_semantic_mask = np.zeros(pts_num).astype(np.int32)
     pts_instance_mask = -np.ones(pts_num).astype(np.int32)
     diff_num_dict = {}
-    obj_pts_list = []
+    obj_pts_num_list = []
     num_bbox = bboxes.shape[0]
 
     pts = np.hstack((pts, labels.reshape(-1, 1)))
     ori_pts = copy.deepcopy(pts)
     for i in range(num_bbox):
         if bboxes[i][-1] < conf_thres:
-            obj_pts_list.append(0)
+            obj_pts_num_list.append(0)
             continue
         bbox_label = int(bboxes[i][0])
         semantic_label = POINTS_CLASS_NAME.index(LABEL_NAME_MAPPING[BBOX_CLASS_NAME[bbox_label]])
 
         in_flag = point_in_bbox(pts, bboxes[i][1:8])
-        obj_pts_list.append(sum(in_flag))
+        obj_pts_num_list.append(sum(in_flag))
         pts_semantic_mask[in_flag] = semantic_label
         pts_instance_mask[in_flag] = i
     for i in range(pts_num):
-        bbox_label = pts_semantic_mask[i]
-        if bbox_label == 0:
+        pt_bbox_label = pts_semantic_mask[i]
+        if pt_bbox_label == 0:
             continue
-        seg_label = labels[i]
-        # if POINTS_CLASS_NAME[seg_label] in POINTS_BACKGROUND_NAME:
+        pt_seg_label = labels[i]
+        # if POINTS_CLASS_NAME[pt_seg_label] in POINTS_BACKGROUND_NAME:
         #     continue
-        if seg_label == 6:
-            seg_label = 2
-        if seg_label != bbox_label:
+        if pt_seg_label == 6:
+            pt_seg_label = 2
+        if pt_seg_label != pt_bbox_label:
             if pts_instance_mask[i] not in diff_num_dict:
                 diff_num_dict[pts_instance_mask[i]] = 1
             else:
@@ -175,22 +177,21 @@ def find_wrong_label_from_dl(pts, labels, bboxes, conf_thres, idx):
             pts[i][3] = 0
 
     for item in diff_num_dict:
-        diff_ratio = diff_num_dict[item] / obj_pts_list[item]
+        diff_ratio = diff_num_dict[item] / obj_pts_num_list[item]
         if diff_ratio > 0.5:
             is_need_label = True
-            ori_pts.tofile('/data/code/seg_data_tools/from_dl/' + idx + '.bin')
-            pts.tofile('/data/code/seg_data_tools/from_dl1/' + idx + '.bin')
+            # ori_pts.tofile('/data/code/seg_data_tools/test/from_dl/' + idx + '.bin')
+            # pts.tofile('/data/code/seg_data_tools/test/from_dl1/' + idx + '.bin')
             break
 
     return is_need_label
 
 def find_wrong_label_from_kdtree(all_pts, cur_pts, idx):
-
     is_need_label = False
     kt = spt.KDTree(data=all_pts[:, :3], leafsize=10)
     wrong_num = 0
     wrong_pts_list = []
-    ori_pts = copy.deepcopy(cur_pts)
+
     for i in range(len(cur_pts)):
         if POINTS_CLASS_NAME[int(cur_pts[i][3])] not in POINTS_BACKGROUND_NAME:
             continue
@@ -203,8 +204,7 @@ def find_wrong_label_from_kdtree(all_pts, cur_pts, idx):
         neighbor_pts = all_pts[idx_list]
         neighbor_labels = neighbor_pts[:, 3]
         diff_num = 10 - np.sum(neighbor_labels == cur_pts[i][3])
-        if cur_pts[i][3] == 11:
-            a = 1
+
         if diff_num >= 5:
             wrong_num += 1
             wrong_pts_list.append(cur_pts[i])
@@ -212,18 +212,38 @@ def find_wrong_label_from_kdtree(all_pts, cur_pts, idx):
         else:
             continue
 
-    if wrong_num/len(cur_pts) > 0.1:
-        is_need_label = True
-        all_pts.tofile('/data/code/seg_data_tools/from_kd/' + idx + '.bin')
-        cur_pts.tofile('/data/code/seg_data_tools/from_kd1/' + idx + '.bin')
+        if wrong_num/len(cur_pts) > 0.1:
+            is_need_label = True
+            # all_pts.tofile('/data/code/seg_data_tools/test/from_kd/' + idx + '.bin')
+            # cur_pts.tofile('/data/code/seg_data_tools/test/from_kd1/' + idx + '.bin')
+            break
     return is_need_label
 
+def get_pcd_list():
+    input_folder = os.listdir(INPUT_PCD_FOLDER)
+    input_pcd_folder = []
+    pcd_files = np.sort(input_folder)
+    for pcd in pcd_files:
+        if os.path.splitext(pcd)[1] == '.pcd':
+            input_pcd_folder.append(pcd)
+    return input_pcd_folder
+
+def copy_need_label_pcd(input_pcd_folder, idx_list):
+    if not os.path.exists(OUTPUT_PCD_FOLDER):
+        os.makedirs(OUTPUT_PCD_FOLDER)
+    for idx in idx_list:
+        old_path = os.path.join(INPUT_PCD_FOLDER, input_pcd_folder[idx])
+        new_path = os.path.join(OUTPUT_PCD_FOLDER, input_pcd_folder[idx])
+        shutil.copy(old_path, new_path)
 
 def main():
     input_bin_folder = os.listdir(INPUT_BIN_FOLDER)
     input_label_folder = os.listdir(INPUT_LABEL_FOLDER)
     input_bbox_folder = os.listdir(INPUT_BBOX_FOLDER)
+    input_pcd_folder = get_pcd_list()
+
     # assert(len(input_bin_folder) == len(input_label_folder))
+    # assert(len(input_bin_folder) == len(input_pcd_folder))
     bin_files = np.sort(input_bin_folder)
     label_files = np.sort(input_label_folder)
     bbox_files = np.sort(input_bbox_folder)
@@ -234,6 +254,7 @@ def main():
     gps_pos, navi_pos, gps_state, position_state = read_lidar_state(lidar_state)
     start_veh_pose = [float(navi_pos[0][0]), float(navi_pos[0][1]), float(navi_pos[0][2])]
     frame_quary = []
+    need_label_idx = []
     need_label_idx_dl = []
     need_label_idx_kdtree = []
     for i in tqdm(range(len(bin_files))):
@@ -247,13 +268,13 @@ def main():
         bbox_file_path = os.path.join(INPUT_BBOX_FOLDER, bbox_files[i])
         pts = np.fromfile(bin_file_path, dtype=np.float32)
         pts = pts.reshape(-1,8)[:, :3]
-        # pts = pts[:, :3]
         labels = np.fromfile(label_file_path, dtype=np.int32)
         bboxes = np.loadtxt(bbox_file_path, dtype=np.float32)
         bboxes = bboxes[:, [0, 1, 2, 3, 5, 6, 4, 7, 9]]
         is_need_label_from_dl = find_wrong_label_from_dl(pts, labels, bboxes, 0.8, str(i).zfill(6))
         if is_need_label_from_dl:
             need_label_idx_dl.append(i)
+            need_label_idx.append(i)
 
         cur_pts = cal_relative_pose(pts, labels, veh_pose, start_veh_pose, i)
 
@@ -266,13 +287,11 @@ def main():
                 is_need_label_from_kdtree = find_wrong_label_from_kdtree(np.array(all_pts), cur_pts, str(i).zfill(6))
                 if is_need_label_from_kdtree:
                     need_label_idx_kdtree.append(i)
+                    need_label_idx.append(i)
 
         frame_quary.append(cur_pts.tolist())
 
-        # save_all_pts = np.array(all_pts, dtype=np.float32)
-        # save_name = os.path.join('/data/code/seg_data_tools/test/', str(i).zfill(6) + '.bin')
-        # save_all_pts.tofile(save_name)
-    a = 1
+    copy_need_label_pcd(input_pcd_folder, need_label_idx)
 
 if __name__ == '__main__':
     main()
